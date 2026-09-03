@@ -38,11 +38,11 @@ jobs:
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           JOBSPY_SITES: ${{ vars.JOBSPY_SITES || 'indeed,linkedin,zip_recruiter,google' }}
-          JOBSPY_SEARCH_TERM: ${{ vars.JOBSPY_SEARCH_TERM || 'software engineer' }}
-          JOBSPY_LOCATION: ${{ vars.JOBSPY_LOCATION || 'San Francisco, CA' }}
-          JOBSPY_GOOGLE_SEARCH_TERM: ${{ vars.JOBSPY_GOOGLE_SEARCH_TERM || 'software engineer jobs near San Francisco, CA since yesterday' }}
+          JOBSPY_SEARCH_TERM: ${{ vars.JOBSPY_SEARCH_TERM || '"software intern" OR "software engineering intern" OR "SWE intern"' }}
+          JOBSPY_LOCATION: ${{ vars.JOBSPY_LOCATION || 'United States' }}
+          JOBSPY_GOOGLE_SEARCH_TERM: ${{ vars.JOBSPY_GOOGLE_SEARCH_TERM || 'software intern jobs in United States posted in the past 4 hours' }}
           JOBSPY_RESULTS_WANTED: ${{ vars.JOBSPY_RESULTS_WANTED || '20' }}
-          JOBSPY_HOURS_OLD: ${{ vars.JOBSPY_HOURS_OLD || '24' }}
+          JOBSPY_HOURS_OLD: ${{ vars.JOBSPY_HOURS_OLD || '4' }}
           JOBSPY_COUNTRY_INDEED: ${{ vars.JOBSPY_COUNTRY_INDEED || 'USA' }}
           JOBSPY_NOTIFY_ON_FIRST_RUN: ${{ vars.JOBSPY_NOTIFY_ON_FIRST_RUN || 'false' }}
         run: python scripts/poll_discord.py

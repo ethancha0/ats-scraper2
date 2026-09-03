@@ -14,6 +14,9 @@ from jobspy import scrape_jobs
 
 STATE_PATH = Path(os.getenv("JOBSPY_STATE_PATH", ".jobspy_seen_jobs.json"))
 DISCORD_LIMIT = 2000
+DEFAULT_SEARCH_TERM = '"software intern" OR "software engineering intern" OR "SWE intern"'
+DEFAULT_LOCATION = "United States"
+DEFAULT_HOURS_OLD = 4
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -68,23 +71,55 @@ def field(job: dict[str, Any], name: str) -> str:
 def format_job(job: dict[str, Any]) -> str:
     title = field(job, "title") or "Untitled role"
     company = field(job, "company") or "Unknown company"
-    location = field(job, "location")
-    site = field(job, "site")
-    date_posted = field(job, "date_posted")
+    location = field(job, "location") or "Unknown"
+    site = field(job, "site") or "Unknown"
+    date_posted = field(job, "date_posted") or "Unknown"
     url = field(job, "job_url")
 
-    parts = [f"**{title}**", company]
-    if location:
-        parts.append(location)
-    if site:
-        parts.append(site)
-    if date_posted:
-        parts.append(f"posted {date_posted}")
+    lines = [
+        f"**{title}**",
+        f"Company: {company}",
+        f"Source: {site}",
+        f"Posted: {date_posted}",
+        f"Location: {location}",
+    ]
 
-    line = " - ".join(parts)
     if url:
-        line = f"{line}\n{url}"
-    return line
+        lines.append(url)
+    return "\n".join(lines)
+
+
+def is_software_intern_role(job: dict[str, Any]) -> bool:
+    title = field(job, "title").lower()
+    if not title:
+        return False
+
+    has_intern = any(term in title for term in ("intern", "internship"))
+    has_software = any(
+        term in title
+        for term in (
+            "software",
+            "swe",
+            "developer",
+            "programmer",
+        )
+    )
+    excluded_terms = (
+        "hardware",
+        "mechanical",
+        "electrical",
+        "civil",
+        "marketing",
+        "sales",
+        "finance",
+        "accounting",
+        "recruit",
+        "human resources",
+    )
+
+    return has_intern and has_software and not any(
+        term in title for term in excluded_terms
+    )
 
 
 def post_discord(webhook_url: str, jobs: list[dict[str, Any]]) -> None:
@@ -114,11 +149,12 @@ def main() -> None:
         raise SystemExit("DISCORD_WEBHOOK_URL is required")
 
     sites = env_list("JOBSPY_SITES", ["indeed", "linkedin", "zip_recruiter", "google"])
-    search_term = os.getenv("JOBSPY_SEARCH_TERM", "software engineer")
-    location = os.getenv("JOBSPY_LOCATION", "San Francisco, CA")
+    search_term = os.getenv("JOBSPY_SEARCH_TERM", DEFAULT_SEARCH_TERM)
+    location = os.getenv("JOBSPY_LOCATION", DEFAULT_LOCATION)
+    hours_old = env_int("JOBSPY_HOURS_OLD", DEFAULT_HOURS_OLD)
     google_search_term = os.getenv(
         "JOBSPY_GOOGLE_SEARCH_TERM",
-        f"{search_term} jobs near {location} since yesterday",
+        f"software intern jobs in {location} posted in the past {hours_old} hours",
     )
 
     jobs = scrape_jobs(
@@ -127,18 +163,19 @@ def main() -> None:
         google_search_term=google_search_term,
         location=location,
         results_wanted=env_int("JOBSPY_RESULTS_WANTED", 20),
-        hours_old=env_int("JOBSPY_HOURS_OLD", 24),
+        hours_old=hours_old,
         country_indeed=os.getenv("JOBSPY_COUNTRY_INDEED", "USA"),
         linkedin_fetch_description=env_bool("JOBSPY_LINKEDIN_FETCH_DESCRIPTION"),
         verbose=env_int("JOBSPY_VERBOSE", 1),
     )
+    job_records = [job for job in jobs.to_dict("records") if is_software_intern_role(job)]
 
     seen = load_seen()
-    current_ids = {job_id(job) for job in jobs.to_dict("records")}
+    current_ids = {job_id(job) for job in job_records}
     first_run = not seen
     new_jobs = [
         job
-        for job in jobs.to_dict("records")
+        for job in job_records
         if job_id(job) not in seen
     ]
 
