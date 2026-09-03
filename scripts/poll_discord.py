@@ -3,9 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
+from datetime import date, datetime, time as dt_time
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -15,9 +18,19 @@ from jobspy import scrape_jobs
 
 STATE_PATH = Path(os.getenv("JOBSPY_STATE_PATH", ".jobspy_seen_jobs.json"))
 DISCORD_LIMIT = 2000
+DISCORD_EMBEDS_PER_MESSAGE = 10
+EMBED_COLOR = 0x3B82F6
+DEFAULT_TZ = "America/Los_Angeles"
 DEFAULT_SEARCH_TERM = '"software intern" OR "software engineering intern" OR "SWE intern"'
 DEFAULT_LOCATION = "United States"
 DEFAULT_HOURS_OLD = 4
+SITE_LABELS = {
+    "linkedin": "LinkedIn",
+    "indeed": "Indeed",
+    "zip_recruiter": "ZipRecruiter",
+    "google": "Google",
+    "glassdoor": "Glassdoor",
+}
 # Leave a buffer so the cache-save step can run before GitHub kills the job.
 DEFAULT_RUN_SECONDS = 6 * 60 * 60 - 10 * 60
 ERROR_BACKOFF_SECONDS = 15
@@ -72,25 +85,110 @@ def field(job: dict[str, Any], name: str) -> str:
     return str(value).strip()
 
 
-def format_job(job: dict[str, Any]) -> str:
+def local_now() -> datetime:
+    return datetime.now(ZoneInfo(os.getenv("JOBSPY_TIMEZONE", DEFAULT_TZ)))
+
+
+def parse_posted_at(value: Any) -> tuple[datetime | None, bool]:
+    """Return (posted_at, has_time). Date-only values are treated as midnight with no time."""
+    if value is None or (not isinstance(value, (datetime, date, str)) and pd.isna(value)):
+        return None, False
+
+    has_time = False
+    posted: datetime | None = None
+
+    if isinstance(value, datetime):
+        posted = value
+        has_time = not (
+            value.hour == 0 and value.minute == 0 and value.second == 0 and value.microsecond == 0
+        )
+    elif isinstance(value, date):
+        posted = datetime.combine(value, dt_time.min)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None, False
+        iso = text.replace("Z", "+00:00")
+        try:
+            posted = datetime.fromisoformat(iso)
+            has_time = "T" in iso or " " in text
+            if posted.hour == 0 and posted.minute == 0 and posted.second == 0:
+                has_time = bool(re.search(r"T\d{2}:\d{2}", iso))
+        except ValueError:
+            for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y"):
+                try:
+                    posted = datetime.strptime(text, fmt)
+                    break
+                except ValueError:
+                    continue
+
+    if posted is None:
+        return None, False
+    if posted.tzinfo is None:
+        posted = posted.replace(tzinfo=local_now().tzinfo)
+    return posted, has_time
+
+
+def format_posted_ago(value: Any, now: datetime) -> str:
+    posted, has_time = parse_posted_at(value)
+    if posted is None:
+        return "Unknown"
+
+    posted = posted.astimezone(now.tzinfo)
+    if not has_time:
+        days = (now.date() - posted.date()).days
+        if days <= 0:
+            return "today"
+        if days == 1:
+            return "yesterday"
+        return f"{days} days ago"
+
+    seconds = max(0, int((now - posted).total_seconds()))
+    if seconds < 60:
+        return f"{seconds} sec ago"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}min ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}h ago"
+    days = hours // 24
+    if days == 1:
+        return "1 day ago"
+    return f"{days} days ago"
+
+
+def source_label(job: dict[str, Any]) -> str:
+    site = field(job, "site")
+    return SITE_LABELS.get(site.lower(), site or "Unknown")
+
+
+def job_embed(job: dict[str, Any], now: datetime) -> dict[str, Any]:
     title = field(job, "title") or "Untitled role"
     company = field(job, "company") or "Unknown company"
     location = field(job, "location") or "Unknown"
-    site = field(job, "site") or "Unknown"
-    date_posted = field(job, "date_posted") or "Unknown"
     url = field(job, "job_url")
-
-    lines = [
-        f"**{title}**",
-        f"Company: {company}",
-        f"Source: {site}",
-        f"Posted: {date_posted}",
-        f"Location: {location}",
-    ]
-
+    embed: dict[str, Any] = {
+        "title": f"{title} — {company}"[:256],
+        "description": location[:4096],
+        "color": EMBED_COLOR,
+        "fields": [
+            {
+                "name": "Posted",
+                "value": format_posted_ago(job.get("date_posted"), now),
+                "inline": True,
+            },
+            {
+                "name": "Source",
+                "value": source_label(job)[:1024],
+                "inline": True,
+            },
+        ],
+        "timestamp": now.isoformat(),
+    }
     if url:
-        lines.append(url)
-    return "\n".join(lines)
+        embed["url"] = url
+    return embed
 
 
 def is_software_intern_role(job: dict[str, Any]) -> bool:
@@ -134,23 +232,12 @@ def post_discord_text(webhook_url: str, content: str) -> None:
 
 
 def post_discord(webhook_url: str, jobs: list[dict[str, Any]]) -> None:
-    header = f"Found {len(jobs)} new job{'s' if len(jobs) != 1 else ''}:"
-    chunks: list[str] = []
-    current = header
-
-    for job in jobs:
-        entry = "\n\n" + format_job(job)
-        if len(current) + len(entry) > DISCORD_LIMIT:
-            chunks.append(current)
-            current = header + entry
-        else:
-            current += entry
-
-    if current:
-        chunks.append(current)
-
-    for content in chunks:
-        post_discord_text(webhook_url, content)
+    now = local_now()
+    embeds = [job_embed(job, now) for job in jobs]
+    for index in range(0, len(embeds), DISCORD_EMBEDS_PER_MESSAGE):
+        chunk = embeds[index : index + DISCORD_EMBEDS_PER_MESSAGE]
+        response = requests.post(webhook_url, json={"embeds": chunk}, timeout=30)
+        response.raise_for_status()
 
 
 def scrape_matching_jobs(
