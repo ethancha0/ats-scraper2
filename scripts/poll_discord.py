@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,9 @@ DISCORD_LIMIT = 2000
 DEFAULT_SEARCH_TERM = '"software intern" OR "software engineering intern" OR "SWE intern"'
 DEFAULT_LOCATION = "United States"
 DEFAULT_HOURS_OLD = 4
+# Leave a buffer so the cache-save step can run before GitHub kills the job.
+DEFAULT_RUN_SECONDS = 6 * 60 * 60 - 10 * 60
+ERROR_BACKOFF_SECONDS = 15
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -122,6 +126,13 @@ def is_software_intern_role(job: dict[str, Any]) -> bool:
     )
 
 
+def post_discord_text(webhook_url: str, content: str) -> None:
+    response = requests.post(
+        webhook_url, json={"content": content[:DISCORD_LIMIT]}, timeout=30
+    )
+    response.raise_for_status()
+
+
 def post_discord(webhook_url: str, jobs: list[dict[str, Any]]) -> None:
     header = f"Found {len(jobs)} new job{'s' if len(jobs) != 1 else ''}:"
     chunks: list[str] = []
@@ -139,8 +150,50 @@ def post_discord(webhook_url: str, jobs: list[dict[str, Any]]) -> None:
         chunks.append(current)
 
     for content in chunks:
-        response = requests.post(webhook_url, json={"content": content}, timeout=30)
-        response.raise_for_status()
+        post_discord_text(webhook_url, content)
+
+
+def scrape_matching_jobs(
+    sites: list[str],
+    search_term: str,
+    google_search_term: str,
+    location: str,
+    hours_old: int,
+) -> list[dict[str, Any]]:
+    jobs = scrape_jobs(
+        site_name=sites,
+        search_term=search_term,
+        google_search_term=google_search_term,
+        location=location,
+        results_wanted=env_int("JOBSPY_RESULTS_WANTED", 20),
+        hours_old=hours_old,
+        country_indeed=os.getenv("JOBSPY_COUNTRY_INDEED", "USA"),
+        linkedin_fetch_description=env_bool("JOBSPY_LINKEDIN_FETCH_DESCRIPTION"),
+        verbose=env_int("JOBSPY_VERBOSE", 1),
+    )
+    if jobs.empty:
+        return []
+    return [job for job in jobs.to_dict("records") if is_software_intern_role(job)]
+
+
+def process_poll(
+    webhook_url: str,
+    job_records: list[dict[str, Any]],
+    seen: set[str],
+    notify_jobs: bool,
+) -> set[str]:
+    current_ids = {job_id(job) for job in job_records}
+    new_jobs = [job for job in job_records if job_id(job) not in seen]
+
+    if new_jobs and notify_jobs:
+        post_discord(webhook_url, new_jobs)
+        print(f"Posted {len(new_jobs)} new jobs to Discord")
+    else:
+        print(f"Found {len(new_jobs)} new jobs; no notification sent")
+
+    updated = seen | current_ids
+    save_seen(updated)
+    return updated
 
 
 def main() -> None:
@@ -156,37 +209,48 @@ def main() -> None:
         "JOBSPY_GOOGLE_SEARCH_TERM",
         f"software intern jobs in {location} posted in the past {hours_old} hours",
     )
-
-    jobs = scrape_jobs(
-        site_name=sites,
-        search_term=search_term,
-        google_search_term=google_search_term,
-        location=location,
-        results_wanted=env_int("JOBSPY_RESULTS_WANTED", 20),
-        hours_old=hours_old,
-        country_indeed=os.getenv("JOBSPY_COUNTRY_INDEED", "USA"),
-        linkedin_fetch_description=env_bool("JOBSPY_LINKEDIN_FETCH_DESCRIPTION"),
-        verbose=env_int("JOBSPY_VERBOSE", 1),
-    )
-    job_records = [job for job in jobs.to_dict("records") if is_software_intern_role(job)]
+    run_seconds = env_int("JOBSPY_RUN_SECONDS", DEFAULT_RUN_SECONDS)
+    interval = max(0, env_int("JOBSPY_POLL_INTERVAL_SECONDS", 0))
+    notify_on_first_run = env_bool("JOBSPY_NOTIFY_ON_FIRST_RUN")
 
     seen = load_seen()
-    current_ids = {job_id(job) for job in job_records}
-    first_run = not seen
-    new_jobs = [
-        job
-        for job in job_records
-        if job_id(job) not in seen
-    ]
+    first_pass = not seen
+    deadline = time.monotonic() + run_seconds
+    pass_num = 0
 
-    notify_on_first_run = env_bool("JOBSPY_NOTIFY_ON_FIRST_RUN")
-    if new_jobs and (notify_on_first_run or not first_run):
-        post_discord(webhook_url, new_jobs)
-        print(f"Posted {len(new_jobs)} new jobs to Discord")
-    else:
-        print(f"Found {len(new_jobs)} new jobs; no notification sent")
+    hours = run_seconds / 3600
+    post_discord_text(
+        webhook_url,
+        f"JobSpy is active and polling for new software intern roles for the next {hours:.1f} hours.",
+    )
+    print(f"Sent startup notification; looping for {run_seconds}s (interval={interval}s)")
 
-    save_seen(seen | current_ids)
+    while time.monotonic() < deadline:
+        pass_num += 1
+        print(f"Poll {pass_num} starting")
+        try:
+            job_records = scrape_matching_jobs(
+                sites, search_term, google_search_term, location, hours_old
+            )
+        except Exception as exc:
+            print(f"Poll {pass_num} failed: {exc}")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(max(interval, ERROR_BACKOFF_SECONDS), remaining))
+            continue
+
+        notify_jobs = notify_on_first_run or not first_pass
+        seen = process_poll(webhook_url, job_records, seen, notify_jobs)
+        first_pass = False
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        if interval:
+            time.sleep(min(interval, remaining))
+
+    print(f"Finished after {pass_num} poll(s)")
 
 
 if __name__ == "__main__":

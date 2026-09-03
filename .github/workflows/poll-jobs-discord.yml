@@ -12,7 +12,7 @@ concurrency:
 jobs:
   poll:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 360
 
     steps:
       - uses: actions/checkout@v4
@@ -45,7 +45,10 @@ jobs:
           JOBSPY_HOURS_OLD: ${{ vars.JOBSPY_HOURS_OLD || '4' }}
           JOBSPY_COUNTRY_INDEED: ${{ vars.JOBSPY_COUNTRY_INDEED || 'USA' }}
           JOBSPY_NOTIFY_ON_FIRST_RUN: ${{ vars.JOBSPY_NOTIFY_ON_FIRST_RUN || 'false' }}
-        run: python scripts/poll_discord.py
+          JOBSPY_RUN_SECONDS: ${{ vars.JOBSPY_RUN_SECONDS || '21000' }}
+          JOBSPY_POLL_INTERVAL_SECONDS: ${{ vars.JOBSPY_POLL_INTERVAL_SECONDS || '0' }}
+          PYTHONUNBUFFERED: "1"
+        run: python -u scripts/poll_discord.py
 
       - name: Save seen jobs
         if: always()
