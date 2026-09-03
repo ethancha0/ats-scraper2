@@ -1,0 +1,55 @@
+name: Poll Jobs and Notify Discord
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: poll-jobs-discord
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Restore seen jobs
+        id: restore-seen
+        uses: actions/cache/restore@v4
+        with:
+          path: .jobspy_seen_jobs.json
+          key: jobspy-seen-${{ github.run_id }}
+          restore-keys: |
+            jobspy-seen-
+
+      - name: Install dependencies
+        run: python -m pip install -e .
+
+      - name: Poll jobs
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          JOBSPY_SITES: ${{ vars.JOBSPY_SITES || 'indeed,linkedin,zip_recruiter,google' }}
+          JOBSPY_SEARCH_TERM: ${{ vars.JOBSPY_SEARCH_TERM || 'software engineer' }}
+          JOBSPY_LOCATION: ${{ vars.JOBSPY_LOCATION || 'San Francisco, CA' }}
+          JOBSPY_GOOGLE_SEARCH_TERM: ${{ vars.JOBSPY_GOOGLE_SEARCH_TERM || 'software engineer jobs near San Francisco, CA since yesterday' }}
+          JOBSPY_RESULTS_WANTED: ${{ vars.JOBSPY_RESULTS_WANTED || '20' }}
+          JOBSPY_HOURS_OLD: ${{ vars.JOBSPY_HOURS_OLD || '24' }}
+          JOBSPY_COUNTRY_INDEED: ${{ vars.JOBSPY_COUNTRY_INDEED || 'USA' }}
+          JOBSPY_NOTIFY_ON_FIRST_RUN: ${{ vars.JOBSPY_NOTIFY_ON_FIRST_RUN || 'false' }}
+        run: python scripts/poll_discord.py
+
+      - name: Save seen jobs
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .jobspy_seen_jobs.json
+          key: jobspy-seen-${{ github.run_id }}
