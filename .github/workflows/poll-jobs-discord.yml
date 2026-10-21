@@ -2,7 +2,9 @@ name: Poll Jobs and Notify Discord
 
 on:
   schedule:
-    - cron: "17 */6 * * *"
+    # Hourly: with the concurrency group below one run is always queued, so the
+    # next run starts as soon as the current one ends and there are no gaps.
+    - cron: "17 * * * *"
   workflow_dispatch:
 
 concurrency:
@@ -37,16 +39,31 @@ jobs:
       - name: Poll jobs
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          JOBSPY_SITES: ${{ vars.JOBSPY_SITES || 'indeed,linkedin,zip_recruiter,google' }}
+          JOBSPY_SITES: ${{ vars.JOBSPY_SITES || 'indeed,linkedin' }}
           JOBSPY_SEARCH_TERM: ${{ vars.JOBSPY_SEARCH_TERM || '"software intern" OR "software engineering intern" OR "SWE intern"' }}
           JOBSPY_LOCATION: ${{ vars.JOBSPY_LOCATION || 'United States' }}
-          JOBSPY_GOOGLE_SEARCH_TERM: ${{ vars.JOBSPY_GOOGLE_SEARCH_TERM || 'software intern jobs in United States posted in the past 4 hours' }}
+          JOBSPY_GOOGLE_SEARCH_TERM: ${{ vars.JOBSPY_GOOGLE_SEARCH_TERM || 'software intern jobs in United States posted in the past 24 hours' }}
           JOBSPY_RESULTS_WANTED: ${{ vars.JOBSPY_RESULTS_WANTED || '20' }}
-          JOBSPY_HOURS_OLD: ${{ vars.JOBSPY_HOURS_OLD || '4' }}
+          JOBSPY_HOURS_OLD: ${{ vars.JOBSPY_HOURS_OLD || '24' }}
           JOBSPY_COUNTRY_INDEED: ${{ vars.JOBSPY_COUNTRY_INDEED || 'USA' }}
+          JOBSPY_LINKEDIN_QUERIES: ${{ vars.JOBSPY_LINKEDIN_QUERIES || 'software intern' }}
+          JOBSPY_LINKEDIN_HOURS_OLD: ${{ vars.JOBSPY_LINKEDIN_HOURS_OLD || '2' }}
+          JOBSPY_LINKEDIN_JOB_TYPE: ${{ vars.JOBSPY_LINKEDIN_JOB_TYPE || 'internship' }}
+          JOBSPY_LINKEDIN_SORT_BY: ${{ vars.JOBSPY_LINKEDIN_SORT_BY || 'date' }}
+          JOBSPY_LINKEDIN_RESULTS_WANTED: ${{ vars.JOBSPY_LINKEDIN_RESULTS_WANTED || '1000' }}
+          JOBSPY_LINKEDIN_MAX_PAGES: ${{ vars.JOBSPY_LINKEDIN_MAX_PAGES || '20' }}
+          JOBSPY_LINKEDIN_SWEEP_MAX_PAGES: ${{ vars.JOBSPY_LINKEDIN_SWEEP_MAX_PAGES || '100' }}
+          JOBSPY_LINKEDIN_SWEEP_EVERY_POLLS: ${{ vars.JOBSPY_LINKEDIN_SWEEP_EVERY_POLLS || '36' }}
+          JOBSPY_LINKEDIN_STOP_AT_KNOWN: ${{ vars.JOBSPY_LINKEDIN_STOP_AT_KNOWN || 'false' }}
+          JOBSPY_LINKEDIN_CARD_TTL_HOURS: ${{ vars.JOBSPY_LINKEDIN_CARD_TTL_HOURS || '48' }}
+          JOBSPY_INDEED_QUERIES: ${{ vars.JOBSPY_INDEED_QUERIES || 'software intern;engineer intern;developer intern;software co-op' }}
+          JOBSPY_INDEED_SORT_BY: ${{ vars.JOBSPY_INDEED_SORT_BY || 'date' }}
+          JOBSPY_INDEED_RESULTS_WANTED: ${{ vars.JOBSPY_INDEED_RESULTS_WANTED || '100' }}
+          JOBSPY_SEEN_TTL_DAYS: ${{ vars.JOBSPY_SEEN_TTL_DAYS || '30' }}
+          JOBSPY_ALERT_AFTER_POLLS: ${{ vars.JOBSPY_ALERT_AFTER_POLLS || '3' }}
           JOBSPY_NOTIFY_ON_FIRST_RUN: ${{ vars.JOBSPY_NOTIFY_ON_FIRST_RUN || 'false' }}
           JOBSPY_RUN_SECONDS: ${{ vars.JOBSPY_RUN_SECONDS || '21000' }}
-          JOBSPY_POLL_INTERVAL_SECONDS: ${{ vars.JOBSPY_POLL_INTERVAL_SECONDS || '0' }}
+          JOBSPY_POLL_INTERVAL_SECONDS: ${{ vars.JOBSPY_POLL_INTERVAL_SECONDS || '600' }}
           PYTHONUNBUFFERED: "1"
         run: python -u scripts/poll_discord.py
 

@@ -282,6 +282,8 @@ class JobPost(BaseModel):
 
 class JobResponse(BaseModel):
     jobs: list[JobPost] = []
+    # optional per-scrape diagnostics (pages fetched, HTTP statuses, errors)
+    stats: dict | None = None
 
 
 class Site(Enum):
@@ -320,6 +322,13 @@ class ScraperInput(BaseModel):
 
     results_wanted: int = 15
     hours_old: int | None = None
+
+    # "date" (newest first) or "relevance"; None keeps each site's default
+    sort_by: str | None = None
+    # LinkedIn incremental polling: stop paginating once a page holds only
+    # these (numeric) job ids, or after linkedin_max_pages pages
+    linkedin_known_job_ids: set[str] | None = None
+    linkedin_max_pages: int | None = None
 
 
 class Scraper(ABC):

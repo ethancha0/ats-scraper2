@@ -94,3 +94,10 @@ def is_job_remote(title: dict, description: str, location: Location) -> bool:
     full_string = f'{title} {description} {location}'.lower()
     is_remote = any(keyword in full_string for keyword in remote_keywords)
     return is_remote
+
+
+def sort_code(sort_by: str | None) -> str | None:
+    """Maps a sort_by value to LinkedIn's sortBy param (DD = newest first)"""
+    if not sort_by:
+        return None
+    return {"date": "DD", "relevance": "R"}[sort_by.lower()]

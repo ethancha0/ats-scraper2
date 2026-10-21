@@ -5,7 +5,7 @@ job_search_query = """
         {location}
         limit: 100
         {cursor}
-        sort: RELEVANCE
+        sort: {sort}
         {filters}
         ) {{
         pageInfo {{
