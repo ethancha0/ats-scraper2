@@ -72,20 +72,53 @@ def test_scrape_site_tracks_raw_linkedin_ids_and_filters(monkeypatch):
     monkeypatch.setattr(poll_discord, "scrape_jobs", fake_scrape_jobs)
     state = SeenState(linkedin_cards={"99": "2026-10-21T00:00:00+00:00"})
     config = SiteConfig(
-        site="linkedin", queries=["software"], results_wanted=1000, hours_old=24,
-        job_type="internship", sort_by="date",
+        site="linkedin", queries=["software intern"], results_wanted=1000,
+        hours_old=2, job_type="internship", sort_by="date", max_pages=20,
+        sweep_hours_old=24, sweep_max_pages=100, sweep_every_polls=36,
+        stop_at_known=True,
     )
     result = scrape_site(config, state, "United States", "")
 
     assert calls[0]["linkedin_known_job_ids"] == {"99"}
     assert calls[0]["site_name"] == ["linkedin"]
     assert calls[0]["sort_by"] == "date"
+    assert calls[0]["hours_old"] == 2 and calls[0]["linkedin_max_pages"] == 20
     # rejected cards are still remembered so paging can stop on them
     assert set(state.linkedin_cards) == {"1", "2", "99"}
     assert len(result.raw) == 2
     assert [job["title"] for job in result.matched] == ["Software Engineer Intern"]
     assert len(result.new) == 1
     assert "pages=1" in result.summary() and "stop=known_ids" in result.summary()
+
+    # sweeps read the full lookback window and never stop at known ids
+    calls.clear()
+    sweep = scrape_site(config, state, "United States", "", sweep=True)
+    assert calls[0]["hours_old"] == 24 and calls[0]["linkedin_max_pages"] == 100
+    assert "linkedin_known_job_ids" not in calls[0]
+    assert sweep.summary().startswith("[linkedin sweep]")
+
+
+def test_known_id_stop_is_opt_in(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        poll_discord, "scrape_jobs", lambda **kw: calls.append(kw) or pd.DataFrame()
+    )
+    state = SeenState(linkedin_cards={"99": "2026-10-21T00:00:00+00:00"})
+    scrape_site(poll_discord.site_config("linkedin"), state, "United States", "")
+    assert "linkedin_known_job_ids" not in calls[0]
+
+
+def test_sweep_schedule():
+    config = SiteConfig(
+        site="linkedin", queries=[], results_wanted=1, hours_old=2,
+        sweep_every_polls=3,
+    )
+    assert [config.is_sweep(n) for n in range(1, 8)] == [
+        True, False, False, True, False, False, True,
+    ]
+    assert not SiteConfig(
+        site="indeed", queries=[], results_wanted=1, hours_old=24
+    ).is_sweep(1)
 
 
 def test_site_config_precedence(monkeypatch):
@@ -98,6 +131,9 @@ def test_site_config_precedence(monkeypatch):
     zip_recruiter = poll_discord.site_config("zip_recruiter")
 
     assert linkedin.queries == ["software", "developer"]
-    assert linkedin.job_type == "internship" and linkedin.hours_old == 6
+    assert linkedin.job_type == "internship"
+    assert linkedin.hours_old == 2 and linkedin.sweep_hours_old == 6
+    assert linkedin.max_pages == 20 and not linkedin.stop_at_known
     assert indeed.results_wanted == 100 and indeed.sort_by is None
+    assert indeed.hours_old == 6 and indeed.sweep_every_polls == 0
     assert zip_recruiter.results_wanted == 20

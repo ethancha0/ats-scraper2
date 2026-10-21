@@ -30,7 +30,9 @@ DEFAULT_SITES = ["indeed", "linkedin"]
 DEFAULT_RESULTS_WANTED = 20
 DEFAULT_SEEN_TTL_DAYS = 30
 DEFAULT_LINKEDIN_CARD_TTL_HOURS = 48
-DEFAULT_LINKEDIN_MAX_PAGES = 10
+DEFAULT_LINKEDIN_MAX_PAGES = 20
+DEFAULT_LINKEDIN_SWEEP_MAX_PAGES = 100
+DEFAULT_LINKEDIN_SWEEP_EVERY_POLLS = 36
 DEFAULT_ALERT_AFTER_POLLS = 3
 # Seconds to wait between consecutive LinkedIn searches (same band as its paging).
 LINKEDIN_QUERY_DELAY = (3, 7)
@@ -42,12 +44,17 @@ STATE_VERSION = 2
 # JOBSPY_SEARCH_TERM / JOBSPY_RESULTS_WANTED settings.
 SITE_DEFAULTS: dict[str, dict[str, Any]] = {
     "linkedin": {
-        # Broad keyword + LinkedIn's internship filter (f_JT=I); the title filter
-        # below does the narrowing.
-        "queries": ["software"],
+        # LinkedIn's guest search currently ignores f_JT (job type) and sortBy and
+        # returns results by relevance, but it does honor the f_TPR time window.
+        # So the keyword itself must say "intern", and each poll reads the whole
+        # short window (hours_old) instead of relying on newest-first order;
+        # a periodic sweep re-reads the full JOBSPY_HOURS_OLD window.
+        "queries": ["software intern"],
+        "hours_old": 2,
+        # Harmless if ignored; takes effect if LinkedIn starts honoring them.
         "job_type": "internship",
         "sort_by": "date",
-        # Paging is bounded by JOBSPY_LINKEDIN_MAX_PAGES and known-id stops.
+        # Paging is bounded by JOBSPY_LINKEDIN_(SWEEP_)MAX_PAGES instead.
         "results_wanted": 1000,
     },
     "indeed": {
@@ -86,6 +93,9 @@ ROLE_TERMS = [
     r"ml",
     r"ai",
     r"machine learning",
+    r"artificial intelligence",
+    r"computer science",
+    r"forward deployed",
     r"platform",
     r"infrastructure",
     r"cloud",
@@ -393,6 +403,16 @@ class SiteConfig:
     hours_old: int
     job_type: str | None = None
     sort_by: str | None = None
+    # LinkedIn only
+    max_pages: int | None = None
+    sweep_hours_old: int | None = None
+    sweep_max_pages: int | None = None
+    sweep_every_polls: int = 0
+    stop_at_known: bool = False
+
+    def is_sweep(self, poll_num: int) -> bool:
+        """Sweep on the first poll of a run and every sweep_every_polls after."""
+        return self.sweep_every_polls > 0 and (poll_num - 1) % self.sweep_every_polls == 0
 
 
 def _optional(value: str | None) -> str | None:
@@ -407,6 +427,20 @@ def site_config(site: str) -> SiteConfig:
     prefix = f"JOBSPY_{site.upper()}_"
     defaults = SITE_DEFAULTS.get(site, {})
     global_query = os.getenv("JOBSPY_SEARCH_TERM", DEFAULT_SEARCH_TERM)
+    global_hours_old = env_int("JOBSPY_HOURS_OLD", DEFAULT_HOURS_OLD)
+    linkedin: dict[str, Any] = {}
+    if site == "linkedin":
+        linkedin = {
+            "max_pages": env_int(prefix + "MAX_PAGES", DEFAULT_LINKEDIN_MAX_PAGES),
+            "sweep_hours_old": global_hours_old,
+            "sweep_max_pages": env_int(
+                prefix + "SWEEP_MAX_PAGES", DEFAULT_LINKEDIN_SWEEP_MAX_PAGES
+            ),
+            "sweep_every_polls": env_int(
+                prefix + "SWEEP_EVERY_POLLS", DEFAULT_LINKEDIN_SWEEP_EVERY_POLLS
+            ),
+            "stop_at_known": env_bool(prefix + "STOP_AT_KNOWN"),
+        }
     return SiteConfig(
         site=site,
         queries=env_queries(
@@ -420,16 +454,18 @@ def site_config(site: str) -> SiteConfig:
             ),
         ),
         hours_old=env_int(
-            prefix + "HOURS_OLD", env_int("JOBSPY_HOURS_OLD", DEFAULT_HOURS_OLD)
+            prefix + "HOURS_OLD", defaults.get("hours_old", global_hours_old)
         ),
         job_type=_optional(env_str(prefix + "JOB_TYPE", defaults.get("job_type"))),
         sort_by=_optional(env_str(prefix + "SORT_BY", defaults.get("sort_by"))),
+        **linkedin,
     )
 
 
 @dataclass
 class SitePollResult:
     site: str
+    sweep: bool = False
     raw: list[dict[str, Any]] = dc_field(default_factory=list)
     matched: list[dict[str, Any]] = dc_field(default_factory=list)
     new: list[dict[str, Any]] = dc_field(default_factory=list)
@@ -440,7 +476,8 @@ class SitePollResult:
 
     def summary(self) -> str:
         line = (
-            f"[{self.site}] raw={len(self.raw)} matched={len(self.matched)} "
+            f"[{self.site}{' sweep' if self.sweep else ''}] "
+            f"raw={len(self.raw)} matched={len(self.matched)} "
             f"new={len(self.new)} pages={self.pages} statuses={self.statuses}"
         )
         if self.stop_reasons:
@@ -462,9 +499,11 @@ def scrape_site(
     state: SeenState,
     location: str,
     google_search_term: str,
+    sweep: bool = False,
 ) -> SitePollResult:
-    result = SitePollResult(site=config.site)
+    result = SitePollResult(site=config.site, sweep=sweep)
     is_linkedin = config.site == "linkedin"
+    hours_old = config.sweep_hours_old if sweep else config.hours_old
     by_id: dict[str, dict[str, Any]] = {}
 
     for index, query in enumerate(config.queries):
@@ -472,10 +511,12 @@ def scrape_site(
             time.sleep(random.uniform(*LINKEDIN_QUERY_DELAY))
         kwargs: dict[str, Any] = {}
         if is_linkedin:
-            kwargs["linkedin_known_job_ids"] = set(state.linkedin_cards)
-            kwargs["linkedin_max_pages"] = env_int(
-                "JOBSPY_LINKEDIN_MAX_PAGES", DEFAULT_LINKEDIN_MAX_PAGES
+            kwargs["linkedin_max_pages"] = (
+                config.sweep_max_pages if sweep else config.max_pages
             )
+            if config.stop_at_known and not sweep:
+                # Only safe while LinkedIn honors newest-first sorting.
+                kwargs["linkedin_known_job_ids"] = set(state.linkedin_cards)
         try:
             jobs = scrape_jobs(
                 site_name=[config.site],
@@ -484,7 +525,7 @@ def scrape_site(
                 location=location,
                 job_type=config.job_type,
                 results_wanted=config.results_wanted,
-                hours_old=config.hours_old,
+                hours_old=hours_old,
                 sort_by=config.sort_by,
                 country_indeed=os.getenv("JOBSPY_COUNTRY_INDEED", "USA"),
                 linkedin_fetch_description=env_bool("JOBSPY_LINKEDIN_FETCH_DESCRIPTION"),
@@ -566,9 +607,13 @@ def run_poll(
     location: str,
     google_search_term: str,
     notify_jobs: bool,
+    poll_num: int = 1,
 ) -> list[SitePollResult]:
     results = [
-        scrape_site(config, state, location, google_search_term) for config in configs
+        scrape_site(
+            config, state, location, google_search_term, config.is_sweep(poll_num)
+        )
+        for config in configs
     ]
     for result in results:
         print(result.summary())
@@ -632,7 +677,13 @@ def main() -> None:
         notify_jobs = notify_on_first_run or not first_pass
         try:
             results = run_poll(
-                webhook_url, configs, state, location, google_search_term, notify_jobs
+                webhook_url,
+                configs,
+                state,
+                location,
+                google_search_term,
+                notify_jobs,
+                pass_num,
             )
         except Exception as exc:
             print(f"Poll {pass_num} failed: {exc}")

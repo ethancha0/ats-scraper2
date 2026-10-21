@@ -38,6 +38,9 @@ from poll_discord import is_software_intern_role, is_software_intern_title
         "Software Engineering Interns",
         "Salesforce Developer Intern",
         "Programmer Intern",
+        "Intern - Artificial Intelligence",
+        "Computer Science and Engineering Co-op - Summer 2027",
+        "Forward Deployed Engineering Intern, BS/MS, Summer 2027",
     ],
 )
 def test_matches_software_intern_titles(title):
