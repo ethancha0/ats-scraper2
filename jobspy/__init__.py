@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Tuple
+from typing import Iterable, Tuple
 
 import pandas as pd
 
@@ -49,11 +49,20 @@ def scrape_jobs(
     enforce_annual_salary: bool = False,
     verbose: int = 0,
     user_agent: str = None,
+    sort_by: str | None = None,
+    linkedin_known_job_ids: Iterable[str] | None = None,
+    linkedin_max_pages: int | None = None,
     **kwargs,
 ) -> pd.DataFrame:
     """
     Scrapes job data from job boards concurrently
-    :return: Pandas DataFrame containing job data
+    :param sort_by: "date" (newest first) or "relevance" for LinkedIn/Indeed;
+        None keeps each site's default
+    :param linkedin_known_job_ids: numeric LinkedIn job ids already seen; LinkedIn
+        stops paginating once a page contains only these ids
+    :param linkedin_max_pages: cap on LinkedIn search pages fetched
+    :return: Pandas DataFrame containing job data. Per-site diagnostics (pages,
+        HTTP statuses, errors) are in ``df.attrs["site_stats"]`` where available.
     """
     SCRAPER_MAPPING = {
         Site.LINKEDIN: LinkedIn,
@@ -99,6 +108,11 @@ def scrape_jobs(
         linkedin_company_ids=linkedin_company_ids,
         offset=offset,
         hours_old=hours_old,
+        sort_by=sort_by,
+        linkedin_known_job_ids=(
+            set(linkedin_known_job_ids) if linkedin_known_job_ids is not None else None
+        ),
+        linkedin_max_pages=linkedin_max_pages,
     )
 
     def scrape_site(site: Site) -> Tuple[str, JobResponse]:
@@ -214,11 +228,18 @@ def scrape_jobs(
         jobs_df = jobs_df[desired_order]
 
         # Step 4: Sort the DataFrame as required
-        return jobs_df.sort_values(
+        jobs_df = jobs_df.sort_values(
             by=["site", "date_posted"], ascending=[True, False]
         ).reset_index(drop=True)
     else:
-        return pd.DataFrame()
+        jobs_df = pd.DataFrame()
+
+    jobs_df.attrs["site_stats"] = {
+        site: job_response.stats
+        for site, job_response in site_to_jobs_dict.items()
+        if job_response.stats is not None
+    }
+    return jobs_df
 
 
 # Add BDJobs to __all__

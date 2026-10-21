@@ -16,6 +16,7 @@ from jobspy.linkedin.constant import headers
 from jobspy.linkedin.util import (
     is_job_remote,
     job_type_code,
+    sort_code,
     parse_job_type,
     parse_job_level,
     parse_company_industry
@@ -84,10 +85,22 @@ class LinkedIn(Scraper):
         seconds_old = (
             scraper_input.hours_old * 3600 if scraper_input.hours_old else None
         )
+        known_ids = scraper_input.linkedin_known_job_ids
+        max_pages = scraper_input.linkedin_max_pages
+        stats = {"pages": 0, "statuses": [], "stop_reason": None, "error": None}
+
+        def finish(reason: str) -> JobResponse:
+            stats["stop_reason"] = reason
+            return JobResponse(
+                jobs=job_list[: scraper_input.results_wanted], stats=stats
+            )
+
         continue_search = (
             lambda: len(job_list) < scraper_input.results_wanted and start < 1000
         )
         while continue_search():
+            if max_pages is not None and request_count >= max_pages:
+                return finish("max_pages")
             request_count += 1
             log.info(
                 f"search page: {request_count} / {math.ceil(scraper_input.results_wanted / 10)}"
@@ -110,6 +123,7 @@ class LinkedIn(Scraper):
                     if scraper_input.linkedin_company_ids
                     else None
                 ),
+                "sortBy": sort_code(scraper_input.sort_by),
             }
             if seconds_old is not None:
                 params["f_TPR"] = f"r{seconds_old}"
@@ -121,6 +135,13 @@ class LinkedIn(Scraper):
                     params=params,
                     timeout=10,
                 )
+                stats["pages"] += 1
+                stats["statuses"].append(response.status_code)
+                if response.status_code not in range(200, 300):
+                    log.warning(
+                        f"page {request_count - 1} (start={start}) returned status "
+                        f"{response.status_code}, response length {len(response.text)}"
+                    )
                 if response.status_code not in range(200, 400):
                     if response.status_code == 429:
                         err = (
@@ -130,24 +151,34 @@ class LinkedIn(Scraper):
                         err = f"LinkedIn response status code {response.status_code}"
                         err += f" - {response.text}"
                     log.error(err)
-                    return JobResponse(jobs=job_list)
+                    stats["error"] = f"HTTP {response.status_code}"
+                    return finish("error")
             except Exception as e:
                 if "Proxy responded with" in str(e):
                     log.error(f"LinkedIn: Bad proxy")
                 else:
                     log.error(f"LinkedIn: {str(e)}")
-                return JobResponse(jobs=job_list)
+                stats["error"] = str(e)[:200]
+                return finish("error")
 
             soup = BeautifulSoup(response.text, "html.parser")
             job_cards = soup.find_all("div", class_="base-search-card")
             if len(job_cards) == 0:
-                return JobResponse(jobs=job_list)
+                if request_count == 1:
+                    # a 200 with no cards on the first page is usually soft-throttling
+                    log.warning(
+                        f"page 0 returned 0 cards (status {response.status_code}, "
+                        f"response length {len(response.text)})"
+                    )
+                return finish("no_cards")
 
+            page_ids = []
             for job_card in job_cards:
                 href_tag = job_card.find("a", class_="base-card__full-link")
                 if href_tag and "href" in href_tag.attrs:
                     href = href_tag.attrs["href"].split("?")[0]
                     job_id = href.split("-")[-1]
+                    page_ids.append(job_id)
 
                     if job_id in seen_ids:
                         continue
@@ -163,12 +194,18 @@ class LinkedIn(Scraper):
                     except Exception as e:
                         raise LinkedInException(str(e))
 
+            if (
+                known_ids is not None
+                and page_ids
+                and all(job_id in known_ids for job_id in page_ids)
+            ):
+                return finish("known_ids")
+
             if continue_search():
                 time.sleep(random.uniform(self.delay, self.delay + self.band_delay))
                 start += len(job_cards)
 
-        job_list = job_list[: scraper_input.results_wanted]
-        return JobResponse(jobs=job_list)
+        return finish("results_wanted" if start < 1000 else "start_limit")
 
     def _process_job(
         self, job_card: Tag, job_id: str, full_descr: bool

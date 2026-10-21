@@ -46,6 +46,7 @@ class Indeed(Scraper):
         self.api_country_code = None
         self.base_url = None
         self.api_url = "https://apis.indeed.com/graphql"
+        self.stats = None
 
     def scrape(self, scraper_input: ScraperInput) -> JobResponse:
         """
@@ -60,6 +61,7 @@ class Indeed(Scraper):
         self.headers["indeed-co"] = self.scraper_input.country.indeed_domain_value
         job_list = []
         page = 1
+        self.stats = {"pages": 0, "statuses": [], "error": None}
 
         cursor = None
 
@@ -77,7 +79,8 @@ class Indeed(Scraper):
             jobs=job_list[
                 scraper_input.offset : scraper_input.offset
                 + scraper_input.results_wanted
-            ]
+            ],
+            stats=self.stats,
         )
 
     def _scrape_page(self, cursor: str | None) -> Tuple[list[JobPost], str | None]:
@@ -104,6 +107,11 @@ class Indeed(Scraper):
             dateOnIndeed=self.scraper_input.hours_old,
             cursor=f'cursor: "{cursor}"' if cursor else "",
             filters=filters,
+            sort=(
+                "DATE"
+                if (self.scraper_input.sort_by or "").lower() == "date"
+                else "RELEVANCE"
+            ),
         )
         payload = {
             "query": query,
@@ -117,10 +125,13 @@ class Indeed(Scraper):
             timeout=10,
             verify=False,
         )
+        self.stats["pages"] += 1
+        self.stats["statuses"].append(response.status_code)
         if not response.ok:
             log.info(
                 f"responded with status code: {response.status_code} (submit GitHub issue if this appears to be a bug)"
             )
+            self.stats["error"] = f"HTTP {response.status_code}"
             return jobs, new_cursor
         data = response.json()
         jobs = data["data"]["jobSearch"]["results"]
